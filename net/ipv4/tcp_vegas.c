@@ -41,12 +41,10 @@
 
 #include "tcp_vegas.h"
 
-static int alpha = 2;
-static int beta  = 4;
+
+static int beta  = 2000;
 static int gamma = 1;
 
-module_param(alpha, int, 0644);
-MODULE_PARM_DESC(alpha, "lower bound of packets in network");
 module_param(beta, int, 0644);
 MODULE_PARM_DESC(beta, "upper bound of packets in network");
 module_param(gamma, int, 0644);
@@ -80,6 +78,7 @@ static void vegas_enable(struct sock *sk)
 	vegas->beg_snd_nxt = tp->snd_nxt;
 
 	vegas->cntRTT = 0;
+	vegas->marked = 0;
 	vegas->minRTT = 0x7fffffff;
 }
 
@@ -122,6 +121,8 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	/* Filter to find propagation delay: */
 	if (vrtt < vegas->baseRTT)
 		vegas->baseRTT = vrtt;
+	if (vrtt > vegas->baseRTT + beta)
+		vegas->marked++;
 
 	/* Find the min RTT during the last RTT to find
 	 * the current prop. delay + queuing delay:
@@ -173,6 +174,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	}
 
 	if (after(ack, vegas->beg_snd_nxt)) {
+		
+		vegas->alpha = (vegas->marked << 8U) / vegas->cntRTT;
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
 		/* Save the extent of the current window so we can use this
@@ -250,22 +253,18 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 				/* Figure out where we would like cwnd
 				 * to be.
 				 */
-				if (diff > beta) {
+				if (vegas->marked > 0) {
 					/* The old window was too fast, so
 					 * we slow down.
 					 */
-					tp->snd_cwnd--;
+					tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;
 					tp->snd_ssthresh
 						= tcp_vegas_ssthresh(tp);
-				} else if (diff < alpha) {
+				} else {
 					/* We don't have enough extra packets
 					 * in the network, so speed up.
 					 */
 					tp->snd_cwnd++;
-				} else {
-					/* Sending just as fast as we
-					 * should be.
-					 */
 				}
 			}
 
@@ -279,6 +278,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 		/* Wipe the slate clean for the next RTT. */
 		vegas->cntRTT = 0;
+		vegas->marked = 0;
 		vegas->minRTT = 0x7fffffff;
 	}
 	/* Use normal slow start */
