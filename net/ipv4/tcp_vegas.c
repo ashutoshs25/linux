@@ -111,7 +111,9 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 {
 	struct vegas *vegas = inet_csk_ca(sk);
 	u32 vrtt;
-
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 basedelay = minmax_get(&tp->rtt_min);
+	
 	if (sample->rtt_us < 0)
 		return;
 
@@ -121,7 +123,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	/* Filter to find propagation delay: */
 	if (vrtt < vegas->baseRTT)
 		vegas->baseRTT = vrtt;
-	if (vrtt > vegas->baseRTT + beta)
+	if (vrtt > basedelay + beta)
 		vegas->marked++;
 
 	/* Find the min RTT during the last RTT to find
