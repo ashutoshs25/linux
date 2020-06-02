@@ -11,9 +11,11 @@ struct vegas {
 	u32	beg_snd_una;	/* left edge  during last RTT */
 	u32	beg_snd_cwnd;	/* saves the size of the cwnd */
 	u8	doing_vegas_now;/* if true, do vegas for this RTT */
-	u16	cntRTT;		/* # of RTTs measured within last RTT */
+	u32	cntRTT;		/* # of RTTs measured within last RTT */
 	u32	minRTT;		/* min of RTTs measured within last RTT (in usec) */
 	u32	baseRTT;	/* the min of all Vegas RTT measurements seen (in usec) */
+	u32	marked;
+	u32	alpha;
 };
 
 void tcp_vegas_init(struct sock *sk);
