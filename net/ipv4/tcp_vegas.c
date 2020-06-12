@@ -44,11 +44,14 @@
 
 static int beta  = 2000;
 static int gamma = 1;
+static unsigned int g = 4;
 
 module_param(beta, int, 0644);
 MODULE_PARM_DESC(beta, "upper bound of packets in network");
 module_param(gamma, int, 0644);
 MODULE_PARM_DESC(gamma, "limit on increase (scale by 2)");
+module_param(g, uint, 0644);
+MODULE_PARM_DESC(g, "limit on increase (scale by 2)");
 
 /* There are several situations when we must "re-start" Vegas:
  *
@@ -80,6 +83,7 @@ static void vegas_enable(struct sock *sk)
 	vegas->cntRTT = 0;
 	vegas->marked = 0;
 	vegas->minRTT = 0x7fffffff;
+	vegas->alpha = 1 << 8U;
 }
 
 /* Stop taking Vegas samples for now. */
@@ -176,7 +180,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	}
 
 	if (after(ack, vegas->beg_snd_nxt)) {
-		
+		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
 		vegas->alpha = (vegas->marked << 8U) / vegas->cntRTT;
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
