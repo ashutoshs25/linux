@@ -42,16 +42,19 @@
 #include "tcp_vegas.h"
 
 
-static int beta  = 2000;
+static int b = 4000;
 static int gamma = 1;
 static unsigned int g = 4;
+static int a = 20;
 
-module_param(beta, int, 0644);
-MODULE_PARM_DESC(beta, "upper bound of packets in network");
+module_param(b, int, 0644);
+MODULE_PARM_DESC(b, "delay threshold");
 module_param(gamma, int, 0644);
 MODULE_PARM_DESC(gamma, "limit on increase (scale by 2)");
 module_param(g, uint, 0644);
-MODULE_PARM_DESC(g, "limit on increase (scale by 2)");
+MODULE_PARM_DESC(g, "WMA shift parameter");
+module_param(a, int, 0644);
+MODULE_PARM_DESC(a, "threshold on no of packets in network");
 
 /* There are several situations when we must "re-start" Vegas:
  *
@@ -115,6 +118,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 {
 	struct vegas *vegas = inet_csk_ca(sk);
 	u32 vrtt;
+	u32 diff;
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay = minmax_get(&tp->rtt_min);
 	
@@ -127,7 +131,10 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	/* Filter to find propagation delay: */
 	if (vrtt < vegas->baseRTT)
 		vegas->baseRTT = vrtt;
-	if (vrtt > basedelay + beta)
+	
+	diff = tp->snd_cwnd * (vrtt-basedelay) / vrtt;
+
+	if ((diff > a) || (vrtt > basedelay + b))
 		vegas->marked++;
 
 	/* Find the min RTT during the last RTT to find
@@ -235,7 +242,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			 */
 			diff = tp->snd_cwnd * (rtt-vegas->baseRTT) / vegas->baseRTT;
 
-			if (diff > gamma && tcp_in_slow_start(tp)) {
+			if (vegas->marked > 0 && tcp_in_slow_start(tp)) {
 				/* Going too fast. Time to slow down
 				 * and switch to congestion avoidance.
 				 */
