@@ -16,6 +16,9 @@ struct vegas {
 	u32	baseRTT;	/* the min of all Vegas RTT measurements seen (in usec) */
 	u32	marked;
 	u32	alpha;
+	u32	starve;
+	u32	beta;
+	u32	start;
 };
 
 void tcp_vegas_init(struct sock *sk);
