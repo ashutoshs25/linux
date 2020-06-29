@@ -42,19 +42,23 @@
 #include "tcp_vegas.h"
 
 
-static int b = 4000;
+static int betao = 2000;
 static int gamma = 1;
 static unsigned int g = 4;
-static int a = 20;
+static int inc_thresh = 10;
+static int starve_rst = 5;
 
-module_param(b, int, 0644);
-MODULE_PARM_DESC(b, "delay threshold");
+module_param(betao, int, 0644);
+MODULE_PARM_DESC(betao, "delay threshold");
 module_param(gamma, int, 0644);
 MODULE_PARM_DESC(gamma, "limit on increase (scale by 2)");
 module_param(g, uint, 0644);
 MODULE_PARM_DESC(g, "WMA shift parameter");
-module_param(a, int, 0644);
-MODULE_PARM_DESC(a, "threshold on no of packets in network");
+module_param(inc_thresh, int, 0644);
+MODULE_PARM_DESC(inc_thresh, "consecutive starves before increasing threshold");
+module_param(starve_rst, int, 0644);
+MODULE_PARM_DESC(starve_rst, "reset starve counter to this threshold");
+
 
 /* There are several situations when we must "re-start" Vegas:
  *
@@ -76,6 +80,11 @@ static void vegas_enable(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct vegas *vegas = inet_csk_ca(sk);
+	
+	if (vegas->start == 0){
+		vegas->beta = betao;
+		vegas->start = 1;
+	}
 
 	/* Begin taking Vegas samples next time we send something. */
 	vegas->doing_vegas_now = 1;
@@ -118,7 +127,6 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 {
 	struct vegas *vegas = inet_csk_ca(sk);
 	u32 vrtt;
-	u32 diff;
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay = minmax_get(&tp->rtt_min);
 	
@@ -132,9 +140,8 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	if (vrtt < vegas->baseRTT)
 		vegas->baseRTT = vrtt;
 	
-	diff = tp->snd_cwnd * (vrtt-basedelay) / vrtt;
 
-	if ((diff > a) || (vrtt > basedelay + b))
+	if (vrtt > (basedelay + vegas->beta))
 		vegas->marked++;
 
 	/* Find the min RTT during the last RTT to find
@@ -189,6 +196,30 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	if (after(ack, vegas->beg_snd_nxt)) {
 		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
 		vegas->alpha = (vegas->marked << 8U) / vegas->cntRTT;
+		
+		if (vegas->marked == vegas->cntRTT)
+			vegas->starve++;
+		else{
+			if (vegas->starve > 0)
+				vegas->starve = 0;
+		}
+
+		if (vegas->starve >= inc_thresh){
+
+			vegas->starve = starve_rst;
+			u32 current_rtt;
+			u32 threshold;
+
+			current_rtt = (tp->srtt_us >> 3);
+			threshold = minmax_get(&tp->rtt_min) + vegas->beta;
+
+			if (current_rtt > threshold){
+				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
+				vegas->beta = vegas->beta + ((current_rtt - threshold) >> 1);
+				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
+			}
+
+		}
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
 		/* Save the extent of the current window so we can use this
