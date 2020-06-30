@@ -19,6 +19,7 @@ struct vegas {
 	u32	starve;
 	u32	beta;
 	u32	start;
+	u32	maxRTT:
 };
 
 void tcp_vegas_init(struct sock *sk);
