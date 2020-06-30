@@ -96,6 +96,7 @@ static void vegas_enable(struct sock *sk)
 	vegas->marked = 0;
 	vegas->minRTT = 0x7fffffff;
 	vegas->alpha = 1 << 8U;
+	vegas->maxRTT = 0;
 }
 
 /* Stop taking Vegas samples for now. */
@@ -148,6 +149,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	 * the current prop. delay + queuing delay:
 	 */
 	vegas->minRTT = min(vegas->minRTT, vrtt);
+	vegas->maxRTT = max(vegas->maxRTT,vrtt);
 	vegas->cntRTT++;
 }
 EXPORT_SYMBOL_GPL(tcp_vegas_pkts_acked);
@@ -220,6 +222,13 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			}
 
 		}
+		
+		if (vegas->maxRTT < ((minmax_get(&tp->rtt_min) + vegas->beta) >> 1)){
+
+			if (vegas->beta > betao)
+				vegas->beta = betao;
+		}
+		
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
 		/* Save the extent of the current window so we can use this
@@ -324,6 +333,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		vegas->cntRTT = 0;
 		vegas->marked = 0;
 		vegas->minRTT = 0x7fffffff;
+		vegas->maxRTT = 0;
 	}
 	/* Use normal slow start */
 	else if (tcp_in_slow_start(tp))
