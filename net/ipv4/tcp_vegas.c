@@ -47,6 +47,9 @@ static int gamma = 1;
 static unsigned int g = 4;
 static int inc_thresh = 10;
 static int starve_rst = 5;
+static int rtt_fairness = 0;
+static int hardcoding = 0;
+static int basedelay_hc = 2000;
 
 module_param(betao, int, 0644);
 MODULE_PARM_DESC(betao, "delay threshold");
@@ -58,6 +61,12 @@ module_param(inc_thresh, int, 0644);
 MODULE_PARM_DESC(inc_thresh, "consecutive starves before increasing threshold");
 module_param(starve_rst, int, 0644);
 MODULE_PARM_DESC(starve_rst, "reset starve counter to this threshold");
+module_param(rtt_fairness, int, 0644);
+MODULE_PARM_DESC(rtt_fairness, "RTT fairness mode 0-no change, 1-increasing speed in 5ms intervals, 2- directly proportional");
+module_param(hardcoding, int, 0644);
+MODULE_PARM_DESC(hardcoding, "0 - using socket basedelay,1 - using hardcoded based delay");
+module_param(basedelay_hc, int, 0644);
+MODULE_PARM_DESC(basedelay_hc, "value of basedelay to be used if hardcoding = 1");
 
 
 /* There are several situations when we must "re-start" Vegas:
@@ -84,6 +93,7 @@ static void vegas_enable(struct sock *sk)
 	if (vegas->start == 0){
 		vegas->beta = betao;
 		vegas->start = 1;
+		vegas->alpha = 1 << 8U;
 	}
 
 	/* Begin taking Vegas samples next time we send something. */
@@ -95,7 +105,6 @@ static void vegas_enable(struct sock *sk)
 	vegas->cntRTT = 0;
 	vegas->marked = 0;
 	vegas->minRTT = 0x7fffffff;
-	vegas->alpha = 1 << 8U;
 	vegas->maxRTT = 0;
 }
 
@@ -111,42 +120,34 @@ void tcp_vegas_init(struct sock *sk)
 {
 	struct vegas *vegas = inet_csk_ca(sk);
 
-	vegas->baseRTT = 0x7fffffff;
 	vegas_enable(sk);
 }
 EXPORT_SYMBOL_GPL(tcp_vegas_init);
 
-/* Do RTT sampling needed for Vegas.
- * Basically we:
- *   o min-filter RTT samples from within an RTT to get the current
- *     propagation delay + queuing delay (we are min-filtering to try to
- *     avoid the effects of delayed ACKs)
- *   o min-filter RTT samples from a much longer window (forever for now)
- *     to find the propagation delay (baseRTT)
- */
+
 void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 {
 	struct vegas *vegas = inet_csk_ca(sk);
 	u32 vrtt;
 	struct tcp_sock *tp = tcp_sk(sk);
-	u32 basedelay = minmax_get(&tp->rtt_min);
+	u32 basedelay;
+
+        if (hardcoding ==1)
+                basedelay = basedelay_hc;
+        else
+                basedelay = minmax_get(&tp->rtt_min);
 	
 	if (sample->rtt_us < 0)
 		return;
 
 	/* Never allow zero rtt or baseRTT */
 	vrtt = sample->rtt_us + 1;
-
-	/* Filter to find propagation delay: */
-	if (vrtt < vegas->baseRTT)
-		vegas->baseRTT = vrtt;
 	
 
 	if (vrtt > (basedelay + vegas->beta))
 		vegas->marked++;
 
-	/* Find the min RTT during the last RTT to find
-	 * the current prop. delay + queuing delay:
+	/* Find the min and max RTT during the last RTT to find
 	 */
 	vegas->minRTT = min(vegas->minRTT, vrtt);
 	vegas->maxRTT = max(vegas->maxRTT,vrtt);
@@ -196,8 +197,18 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	}
 
 	if (after(ack, vegas->beg_snd_nxt)) {
+		
+		u32 basedelay;
+
+                if (hardcoding == 1)
+                        basedelay = basedelay_hc;
+                else
+                        basedelay = minmax_get(&tp->rtt_min);
+		
 		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
-		vegas->alpha = (vegas->marked << 8U) / vegas->cntRTT;
+		// vegas->alpha = (vegas->marked << 8U) / vegas->cntRTT;
+		
+		// algorithm for competing with loss based / new flows
 		
 		if (vegas->marked == vegas->cntRTT)
 			vegas->starve++;
@@ -213,17 +224,21 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			u32 threshold;
 
 			current_rtt = (tp->srtt_us >> 3);
-			threshold = minmax_get(&tp->rtt_min) + vegas->beta;
+			threshold = basedelay + vegas->beta;
 
 			if (current_rtt > threshold){
+				
 				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
+				
 				vegas->beta = vegas->beta + ((current_rtt - threshold) >> 1);
+				
 				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
 			}
 
 		}
 		
-		if (vegas->maxRTT < ((minmax_get(&tp->rtt_min) + vegas->beta) >> 1)){
+		// resuming low delay operation
+		if (vegas->maxRTT < (basedelay + vegas->beta) >> 1)){
 
 			if (vegas->beta > betao)
 				vegas->beta = betao;
@@ -231,19 +246,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
-		/* Save the extent of the current window so we can use this
-		 * at the end of the next RTT.
-		 */
 		vegas->beg_snd_nxt  = tp->snd_nxt;
-
-		/* We do the Vegas calculations only if we got enough RTT
-		 * samples that we can be reasonably sure that we got
-		 * at least one RTT sample that wasn't from a delayed ACK.
-		 * If we only had 2 samples total,
-		 * then that means we're getting only 1 ACK per RTT, which
-		 * means they're almost certainly delayed ACKs.
-		 * If  we have 3 samples, we should be OK.
-		 */
 
 		if (vegas->cntRTT <= 2) {
 			/* We don't have enough RTT samples to do the Vegas
@@ -251,48 +254,17 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			 */
 			tcp_reno_cong_avoid(sk, ack, acked);
 		} else {
-			u32 rtt, diff;
+			u32 rtt;
 			u64 target_cwnd;
-
-			/* We have enough RTT samples, so, using the Vegas
-			 * algorithm, we determine if we should increase or
-			 * decrease cwnd, and by how much.
-			 */
-
-			/* Pluck out the RTT we are using for the Vegas
-			 * calculations. This is the min RTT seen during the
-			 * last RTT. Taking the min filters out the effects
-			 * of delayed ACKs, at the cost of noticing congestion
-			 * a bit later.
-			 */
+			
 			rtt = vegas->minRTT;
 
-			/* Calculate the cwnd we should have, if we weren't
-			 * going too fast.
-			 *
-			 * This is:
-			 *     (actual rate in segments) * baseRTT
-			 */
-			target_cwnd = (u64)tp->snd_cwnd * vegas->baseRTT;
+			target_cwnd = (u64)tp->snd_cwnd * basedelay;
 			do_div(target_cwnd, rtt);
-
-			/* Calculate the difference between the window we had,
-			 * and the window we would like to have. This quantity
-			 * is the "Diff" from the Arizona Vegas papers.
-			 */
-			diff = tp->snd_cwnd * (rtt-vegas->baseRTT) / vegas->baseRTT;
 
 			if (vegas->marked > 0 && tcp_in_slow_start(tp)) {
 				/* Going too fast. Time to slow down
 				 * and switch to congestion avoidance.
-				 */
-
-				/* Set cwnd to match the actual rate
-				 * exactly:
-				 *   cwnd = (actual rate) * baseRTT
-				 * Then we add 1 because the integer
-				 * truncation robs us of full link
-				 * utilization.
 				 */
 				tp->snd_cwnd = min(tp->snd_cwnd, (u32)target_cwnd+1);
 				tp->snd_ssthresh = tcp_vegas_ssthresh(tp);
@@ -303,13 +275,9 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			} else {
 				/* Congestion avoidance. */
 
-				/* Figure out where we would like cwnd
-				 * to be.
-				 */
 				if (vegas->marked > 0) {
-					/* The old window was too fast, so
-					 * we slow down.
-					 */
+					
+					// fractional cwnd decrease (DCTCP)
 					tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;
 					tp->snd_ssthresh
 						= tcp_vegas_ssthresh(tp);
@@ -317,7 +285,13 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 					/* We don't have enough extra packets
 					 * in the network, so speed up.
 					 */
-					tp->snd_cwnd++;
+					
+					if (rtt_fairness == 0)
+                                                tp->snd_cwnd++;          // additive increase
+                                    	else if (rtt_fairness == 1)
+                                             	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
+                                      	else
+                              			tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/1000);
 				}
 			}
 
