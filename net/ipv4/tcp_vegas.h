@@ -13,13 +13,12 @@ struct vegas {
 	u8	doing_vegas_now;/* if true, do vegas for this RTT */
 	u32	cntRTT;		/* # of RTTs measured within last RTT */
 	u32	minRTT;		/* min of RTTs measured within last RTT (in usec) */
-	u32	baseRTT;	/* the min of all Vegas RTT measurements seen (in usec) */
 	u32	marked;
 	u32	alpha;
 	u32	starve;
 	u32	beta;
 	u32	start;
-	u32	maxRTT:
+	u32	maxRTT;
 };
 
 void tcp_vegas_init(struct sock *sk);
