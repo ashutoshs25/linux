@@ -43,18 +43,19 @@
 
 
 static int betao = 2000;
-static int gamma = 1;
+static int gamma = 4;
 static unsigned int g = 4;
-static int inc_thresh = 10;
+static int inc_thresh = 5;
 static int starve_rst = 5;
 static int rtt_fairness = 0;
-static int hardcoding = 0;
+static int hardcoding = 1;
 static int basedelay_hc = 2000;
+static int m = 50;
 
 module_param(betao, int, 0644);
 MODULE_PARM_DESC(betao, "delay threshold");
 module_param(gamma, int, 0644);
-MODULE_PARM_DESC(gamma, "limit on increase (scale by 2)");
+MODULE_PARM_DESC(gamma, "RTT fairness scaling factor");
 module_param(g, uint, 0644);
 MODULE_PARM_DESC(g, "WMA shift parameter");
 module_param(inc_thresh, int, 0644);
@@ -67,6 +68,9 @@ module_param(hardcoding, int, 0644);
 MODULE_PARM_DESC(hardcoding, "0 - using socket basedelay,1 - using hardcoded based delay");
 module_param(basedelay_hc, int, 0644);
 MODULE_PARM_DESC(basedelay_hc, "value of basedelay to be used if hardcoding = 1");
+module_param(m, int, 0644);
+MODULE_PARM_DESC(m, "threshold increase factor * 100");
+
 
 
 /* There are several situations when we must "re-start" Vegas:
@@ -94,6 +98,7 @@ static void vegas_enable(struct sock *sk)
 		vegas->beta = betao;
 		vegas->start = 1;
 		vegas->alpha = 1 << 8U;
+		vegas->baseRTT = 0x7fffffff;
 	}
 
 	/* Begin taking Vegas samples next time we send something. */
@@ -132,10 +137,16 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay;
 
-        if (hardcoding ==1)
-                basedelay = basedelay_hc;
-        else
-                basedelay = minmax_get(&tp->rtt_min);
+	vegas->baseRTT = min(vegas->baseRTT, vrtt);
+
+	if (hardcoding == 0)
+        	basedelay = basedelay_hc;
+        else if (hardcoding == 1)
+             	basedelay = minmax_get(&tp->rtt_min);
+       	else if (hardcoding == 2)
+              	basedelay = vegas->baseRTT;
+       	else
+          	basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
 	
 	if (sample->rtt_us < 0)
 		return;
@@ -200,13 +211,18 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		
 		u32 basedelay;
 
-                if (hardcoding == 1)
+                if (hardcoding == 0)
                         basedelay = basedelay_hc;
-                else
+                else if (hardcoding == 1)
                         basedelay = minmax_get(&tp->rtt_min);
+		else if (hardcoding == 2)
+			basedelay = vegas->baseRTT;
+		else
+			basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
+
 		
 		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
-		// vegas->alpha = (vegas->marked << 8U) / vegas->cntRTT;
+		// vegas->alpha = (vegas->marked << i8U) / vegas->cntRTT;
 		
 		// algorithm for competing with loss based / new flows
 		
@@ -230,7 +246,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 				
 				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
 				
-				vegas->beta = vegas->beta + ((current_rtt - threshold) >> 1);
+				vegas->beta = vegas->beta + ((m*(current_rtt - threshold))/100);
 				
 				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
 			}
@@ -238,7 +254,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		}
 		
 		// resuming low delay operation
-		if (vegas->maxRTT < (basedelay + vegas->beta) >> 1)){
+		if (vegas->maxRTT < (basedelay + vegas->beta) >> 1){
 
 			if (vegas->beta > betao)
 				vegas->beta = betao;
@@ -291,7 +307,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
                                     	else if (rtt_fairness == 1)
                                              	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
                                       	else
-                              			tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/1000);
+                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(tp->srtt_us >> 3));
 				}
 			}
 
