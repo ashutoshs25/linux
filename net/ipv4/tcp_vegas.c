@@ -46,6 +46,7 @@ static int compete = 1;
 static int comeback = 1;
 static int betao = 2000;
 static int gamma = 4;
+static int delta = 100;
 static unsigned int g = 4;
 static int inc_thresh = 5;
 static int starve_rst = 5;
@@ -76,6 +77,8 @@ module_param(compete, int, 0644);
 MODULE_PARM_DESC(compete, "1- competition enabled,2- no competition");
 module_param(comeback, int, 0644);
 MODULE_PARM_DESC(comeback, "1- resume low delay enabled,2- no resume low delay");
+module_param(delta, int, 0644);
+MODULE_PARM_DESC(delta, "Delta parameter");
 
 
 
@@ -232,7 +235,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		
 		// algorithm for competing with loss based / new flows
 		
-		if (vegas->marked == vegas->cntRTT)
+		if (vegas->marked >= ((delta * vegas->cntRTT)/100))
 			vegas->starve++;
 		else{
 			if (vegas->starve > 0)
