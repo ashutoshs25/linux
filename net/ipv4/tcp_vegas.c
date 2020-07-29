@@ -42,7 +42,7 @@
 #include "tcp_vegas.h"
 
 
-static int betao = 2000;
+static int K = 20;
 static int gamma = 4;
 static unsigned int g = 4;
 static int inc_thresh = 5;
@@ -52,8 +52,8 @@ static int hardcoding = 1;
 static int basedelay_hc = 2000;
 static int m = 50;
 
-module_param(betao, int, 0644);
-MODULE_PARM_DESC(betao, "delay threshold");
+module_param(K, int, 0644);
+MODULE_PARM_DESC(K, "queue delay threshold");
 module_param(gamma, int, 0644);
 MODULE_PARM_DESC(gamma, "RTT fairness scaling factor");
 module_param(g, uint, 0644);
@@ -95,7 +95,6 @@ static void vegas_enable(struct sock *sk)
 	struct vegas *vegas = inet_csk_ca(sk);
 	
 	if (vegas->start == 0){
-		vegas->beta = betao;
 		vegas->start = 1;
 		vegas->alpha = 1 << 8U;
 		vegas->baseRTT = 0x7fffffff;
@@ -136,6 +135,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	u32 vrtt;
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay;
+	u32 diff;
 
 	vegas->baseRTT = min(vegas->baseRTT, vrtt);
 
@@ -153,9 +153,11 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 
 	/* Never allow zero rtt or baseRTT */
 	vrtt = sample->rtt_us + 1;
+
+	diff = tp->snd_cwnd * (vrtt-vegas->baseRTT) / vrtt;
 	
 
-	if (vrtt > (basedelay + vegas->beta))
+	if (diff > K)
 		vegas->marked++;
 
 	/* Find the min and max RTT during the last RTT to find
@@ -224,41 +226,6 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
 		// vegas->alpha = (vegas->marked << i8U) / vegas->cntRTT;
 		
-		// algorithm for competing with loss based / new flows
-		
-		if (vegas->marked == vegas->cntRTT)
-			vegas->starve++;
-		else{
-			if (vegas->starve > 0)
-				vegas->starve = 0;
-		}
-
-		if (vegas->starve >= inc_thresh){
-
-			vegas->starve = starve_rst;
-			u32 current_rtt;
-			u32 threshold;
-
-			current_rtt = (tp->srtt_us >> 3);
-			threshold = basedelay + vegas->beta;
-
-			if (current_rtt > threshold){
-				
-				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
-				
-				vegas->beta = vegas->beta + ((m*(current_rtt - threshold))/100);
-				
-				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
-			}
-
-		}
-		
-		// resuming low delay operation
-		if (vegas->maxRTT < (basedelay + vegas->beta) >> 1){
-
-			if (vegas->beta > betao)
-				vegas->beta = betao;
-		}
 		
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
@@ -301,14 +268,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 					/* We don't have enough extra packets
 					 * in the network, so speed up.
 					 */
-					
-					if (rtt_fairness == 0)
-                                                tp->snd_cwnd++;          // additive increase
-                                    	else if (rtt_fairness == 1)
-                                             	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
-                                      	else
-                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(tp->srtt_us >> 3));
-				}
+                                        tp->snd_cwnd++;          // additive increase
+                               }
 			}
 
 			if (tp->snd_cwnd < 2)
@@ -323,7 +284,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		vegas->cntRTT = 0;
 		vegas->marked = 0;
 		vegas->minRTT = 0x7fffffff;
-		vegas->maxRTT = 0;
+		
 	}
 	/* Use normal slow start */
 	else if (tcp_in_slow_start(tp))

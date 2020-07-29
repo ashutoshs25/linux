@@ -15,8 +15,6 @@ struct vegas {
 	u32	minRTT;		/* min of RTTs measured within last RTT (in usec) */
 	u32	marked;
 	u32	alpha;
-	u32	starve;
-	u32	beta;
 	u32	start;
 	u32	maxRTT;
 	u32	baseRTT;
