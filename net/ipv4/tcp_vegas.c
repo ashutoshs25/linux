@@ -42,13 +42,15 @@
 #include "tcp_vegas.h"
 
 
+static int compete = 1;
+static int comeback = 1;
 static int betao = 2000;
 static int gamma = 4;
 static unsigned int g = 4;
 static int inc_thresh = 5;
 static int starve_rst = 5;
-static int rtt_fairness = 0;
-static int hardcoding = 1;
+static int rtt_fairness = 2;
+static int hardcoding = 3;
 static int basedelay_hc = 2000;
 static int m = 50;
 
@@ -70,6 +72,10 @@ module_param(basedelay_hc, int, 0644);
 MODULE_PARM_DESC(basedelay_hc, "value of basedelay to be used if hardcoding = 1");
 module_param(m, int, 0644);
 MODULE_PARM_DESC(m, "threshold increase factor * 100");
+module_param(compete, int, 0644);
+MODULE_PARM_DESC(compete, "1- competition enabled,2- no competition");
+module_param(comeback, int, 0644);
+MODULE_PARM_DESC(comeback, "1- resume low delay enabled,2- no resume low delay");
 
 
 
@@ -245,8 +251,10 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			if (current_rtt > threshold){
 				
 				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
-				
-				vegas->beta = vegas->beta + ((m*(current_rtt - threshold))/100);
+
+				if (compete == 1)		
+					vegas->beta = vegas->beta + ((m*(current_rtt - threshold))/100);
+
 				
 				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
 			}
@@ -254,9 +262,11 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		}
 		
 		// resuming low delay operation
+
+		
 		if (vegas->maxRTT < (basedelay + vegas->beta) >> 1){
 
-			if (vegas->beta > betao)
+			if ((vegas->beta > betao) && (comeback == 1)) 
 				vegas->beta = betao;
 		}
 		
