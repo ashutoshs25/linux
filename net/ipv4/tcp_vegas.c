@@ -321,7 +321,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
                                     	else if (rtt_fairness == 1)
                                              	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
                                       	else
-                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(basedelay + beta));
+                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(basedelay + vegas->beta));
 				}
 			}
 
