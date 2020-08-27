@@ -219,7 +219,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	if (after(ack, vegas->beg_snd_nxt)) {
 		
 		u32 basedelay;
-
+		
+		printk(KERN_INFO "marked=%d total=%d\n",vegas->marked,vegas->cntRTT);
                 if (hardcoding == 0)
                         basedelay = basedelay_hc;
                 else if (hardcoding == 1)
@@ -253,13 +254,13 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 			if (current_rtt > threshold){
 				
-				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
+				// printk(KERN_INFO "old threshold=%d\n",vegas->beta);
 
 				if (compete == 1)		
 					vegas->beta = vegas->beta + ((m*(current_rtt - threshold))/100);
 
 				
-				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
+				// printk(KERN_INFO "new threshold=%d\n",vegas->beta);
 			}
 
 		}
@@ -320,7 +321,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
                                     	else if (rtt_fairness == 1)
                                              	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
                                       	else
-                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(tp->srtt_us >> 3));
+                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(basedelay + beta));
 				}
 			}
 
