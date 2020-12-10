@@ -15,12 +15,15 @@ struct vegas {
 	u32	minRTT;		/* min of RTTs measured within last RTT (in usec) */
 	u32	marked;
 	u32	alpha;
-	u32	starve;
 	u32	beta;
+	u32 	delth;
+	u32	delmax;
 	u32	start;
 	u32	maxRTT;
 	u32	baseRTT;
-};
+	u64 	p_dec;
+	u32	id;
+}
 
 void tcp_vegas_init(struct sock *sk);
 void tcp_vegas_state(struct sock *sk, u8 ca_state);

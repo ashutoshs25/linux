@@ -42,15 +42,30 @@
 #include "tcp_vegas.h"
 
 
-static int betao = 2000;
+static int betao = 2000;	   // threshold of our scheme = del-min of Cx-TCP
 static int gamma = 4;
-static unsigned int g = 4;
-static int inc_thresh = 5;
-static int starve_rst = 5;
+
+static unsigned int g = 4;	   // EWMA smoothing factor G = 2^g, e.g. g=4 means alpha = (1*alpha_old + 15*alpha_new)/16
+
 static int rtt_fairness = 0;
-static int hardcoding = 1;
+
+
+static int hardcoding = 1;	  // option to hardcode the basedelay (1 here means we use actual measured min RTT)
 static int basedelay_hc = 2000;
-static int m = 50;
+
+
+static int del_max = 15000;	// delay thresholds are in micro seconds
+static int del_th = 4000;
+
+static int p_max = 1000;      // Probability values are up-scaled to the range 0 - 1000
+static int p_min = 0;
+
+static int power = 2;
+
+static int fractional = 0;
+
+static int id = 0;
+
 
 module_param(betao, int, 0644);
 MODULE_PARM_DESC(betao, "delay threshold");
@@ -58,18 +73,25 @@ module_param(gamma, int, 0644);
 MODULE_PARM_DESC(gamma, "RTT fairness scaling factor");
 module_param(g, uint, 0644);
 MODULE_PARM_DESC(g, "WMA shift parameter");
-module_param(inc_thresh, int, 0644);
-MODULE_PARM_DESC(inc_thresh, "consecutive starves before increasing threshold");
-module_param(starve_rst, int, 0644);
-MODULE_PARM_DESC(starve_rst, "reset starve counter to this threshold");
 module_param(rtt_fairness, int, 0644);
 MODULE_PARM_DESC(rtt_fairness, "RTT fairness mode 0-no change, 1-increasing speed in 5ms intervals, 2- directly proportional");
 module_param(hardcoding, int, 0644);
-MODULE_PARM_DESC(hardcoding, "0 - using socket basedelay,1 - using hardcoded based delay");
+MODULE_PARM_DESC(hardcoding, "1 - using socket basedelay,0 - using hardcoded based delay");
 module_param(basedelay_hc, int, 0644);
 MODULE_PARM_DESC(basedelay_hc, "value of basedelay to be used if hardcoding = 1");
-module_param(m, int, 0644);
-MODULE_PARM_DESC(m, "threshold increase factor * 100");
+module_param(del_th, int, 0644);
+MODULE_PARM_DESC(del_th, "delay threshold at which max prob of decrease");
+module_param(del_max, int, 0644);
+MODULE_PARM_DESC(del_max, "max delay threshold");
+module_param(p_max, int, 0644);
+MODULE_PARM_DESC(p_max, "max prob of decrease");
+module_param(p_min, int, 0644);
+MODULE_PARM_DESC(p_min, "min prob of decrease");
+module_param(fractional, int, 0644);
+MODULE_PARM_DESC(fractional, "fractional decrease");
+module_param(power, int, 0644);
+MODULE_PARM_DESC(power, "Power");
+
 
 
 
@@ -94,11 +116,20 @@ static void vegas_enable(struct sock *sk)
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct vegas *vegas = inet_csk_ca(sk);
 	
-	if (vegas->start == 0){
+	if (vegas->start == 0){   
+
 		vegas->beta = betao;
+		vegas->delth = del_th;
+		vegas->delmax = del_max;
+
 		vegas->start = 1;
+
 		vegas->alpha = 1 << 8U;
+
 		vegas->baseRTT = 0x7fffffff;
+
+		id++;
+		vegas->id = id;			// Flow ID 
 	}
 
 	/* Begin taking Vegas samples next time we send something. */
@@ -137,7 +168,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay;
 
-	vegas->baseRTT = min(vegas->baseRTT, vrtt);
+	
 
 	if (hardcoding == 0)
         	basedelay = basedelay_hc;
@@ -155,12 +186,15 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	vrtt = sample->rtt_us + 1;
 	
 
-	if (vrtt > (basedelay + vegas->beta))
+	if (vrtt > (basedelay + vegas->beta)) 		// counting of marked ACKS
 		vegas->marked++;
+
+
 
 	/* Find the min and max RTT during the last RTT to find
 	 */
 	vegas->minRTT = min(vegas->minRTT, vrtt);
+	vegas->baseRTT = min(vegas->baseRTT, vrtt);
 	vegas->maxRTT = max(vegas->maxRTT,vrtt);
 	vegas->cntRTT++;
 }
@@ -197,6 +231,40 @@ static inline u32 tcp_vegas_ssthresh(struct tcp_sock *tp)
 	return  min(tp->snd_ssthresh, tp->snd_cwnd);
 }
 
+static inline u32 tcp_vegas_loss_ssthresh(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+        struct vegas *vegas = inet_csk_ca(sk);
+
+	vegas->marked++;
+
+        return  min(tp->snd_ssthresh, tp->snd_cwnd);
+}
+
+static void tcp_vegas_pow(struct sock *sk, u32 frac)
+{
+	struct vegas *vegas = inet_csk_ca(sk);
+
+	// Region B probability calculation
+
+	if (power == 1){
+		vegas->p_dec = ((p_min * 1000) + ((p_max - p_min) * frac))/1000;
+	}
+	else if (power == 2){
+		vegas->p_dec = ((p_min * 1000 * 1000) + ((p_max - p_min) * frac * frac))/(1000 * 1000);		
+	}
+	else if (power ==3){
+		vegas->p_dec = ((p_min * 1000 * 1000 * 1000) + ((p_max - p_min) * frac * frac * frac))/(1000 * 1000 * 1000);
+	}
+	else
+		vegas->p_dec = ((p_min * 1000 * 1000 * 1000 * 1000) + ((p_max - p_min) * frac * frac * frac * frac))/(1000 * 1000 * 1000 * 1000);
+
+	printk(KERN_INFO "Flow ID = %d, max prob of decrease = %d, min  probability of decrease =%d, probability of decrease = %lld, fraction = %d", vegas->id, p_max, p_min,  vegas->p_dec, frac);
+
+
+
+}
+
 static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -209,7 +277,12 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 	if (after(ack, vegas->beg_snd_nxt)) {
 		
-		u32 basedelay;
+		u32 basedelay; 
+		u32 srtt; 
+
+		srtt = tp->srtt_us >> 3;
+
+		printk(KERN_INFO "Flow ID : %d, marked=%d total=%d\n",vegas->id, vegas->marked,vegas->cntRTT);
 
                 if (hardcoding == 0)
                         basedelay = basedelay_hc;
@@ -221,44 +294,51 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
 
 		
-		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
-		// vegas->alpha = (vegas->marked << i8U) / vegas->cntRTT;
+		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;		// EWMA(fraction of marked packets)
 		
-		// algorithm for competing with loss based / new flows
 		
-		if (vegas->marked == vegas->cntRTT)
-			vegas->starve++;
-		else{
-			if (vegas->starve > 0)
-				vegas->starve = 0;
-		}
+	
+		// Cx-TCP probability calculation
 
-		if (vegas->starve >= inc_thresh){
+		u32 delta;
+		delta = srtt - basedelay;
 
-			vegas->starve = starve_rst;
-			u32 current_rtt;
-			u32 threshold;
-
-			current_rtt = (tp->srtt_us >> 3);
-			threshold = basedelay + vegas->beta;
-
-			if (current_rtt > threshold){
-				
-				printk(KERN_INFO "old threshold=%d\n",vegas->beta);
-				
-				vegas->beta = vegas->beta + ((m*(current_rtt - threshold))/100);
-				
-				printk(KERN_INFO "new threshold=%d\n",vegas->beta);
-			}
-
-		}
+		printk(KERN_INFO "Flow ID = %d, delta = %d, delta_th = %d, delta_max = %d, delta_min = %d", vegas->id, delta, vegas->delth, vegas->delmax, vegas->beta);
 		
-		// resuming low delay operation
-		if (vegas->maxRTT < (basedelay + vegas->beta) >> 1){
+		// vegas->beta is del_min of the Cx-TCP paper 
 
-			if (vegas->beta > betao)
-				vegas->beta = betao;
+		if (delta <= vegas->beta) 
+			vegas->p_dec = 0;
+		else if (delta < vegas->delth){
+
+			// Region A 
+
+			vegas->p_dec = (p_max * (delta - vegas->beta) * 1000) / (vegas->delth - vegas->beta);
+
+			vegas->p_dec = vegas->p_dec / 1000;
+			
 		}
+		else if (delta < vegas->delmax){
+
+			u32 frac = ((vegas->delmax - delta) * 1000)/ (vegas->delmax - vegas->delth);
+
+			printk(KERN_INFO "frac = %d ", frac);
+			
+			tcp_vegas_pow(sk,frac);
+			
+		}
+		else
+			vegas->p_dec = p_min;
+		
+		printk(KERN_INFO "Flow ID = %d, max prob of decrease = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, vegas->p_dec);
+
+		// Random number between 1 to 1000
+
+		int i, lessthan1000;
+		get_random_bytes(&i, sizeof(i));
+		lessthan1000 = abs(i) % 1000;
+
+
 		
 		/* Do the Vegas once-per-RTT cwnd adjustment. */
 
@@ -292,9 +372,31 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 				/* Congestion avoidance. */
 
 				if (vegas->marked > 0) {
+
+				      printk(KERN_INFO "Flow ID = %d, random number = %d, probability of decrease * 1000 =%lld, comparison = %d", vegas->id, lessthan1000, vegas->p_dec, lessthan1000 < vegas->p_dec);
 					
-					// fractional cwnd decrease (DCTCP)
-					tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;
+				      if (lessthan1000 < vegas->p_dec){
+
+
+					      if (fractional == 0){
+						      tp->snd_cwnd = (tp->snd_cwnd) >> 1U;  // halving the CWND
+					      }
+					      else
+						      tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;   // DCTCP style decrease
+
+					      tp->snd_ssthresh
+                                                        = tcp_vegas_ssthresh(tp);
+
+					      printk(KERN_INFO "Flow ID = %d, CWND = %d,", vegas->id, tp->snd_cwnd);
+				      }
+						
+				      else{
+						tp->snd_cwnd++;
+				      }
+
+
+				       
+
 					tp->snd_ssthresh
 						= tcp_vegas_ssthresh(tp);
 				} else {
@@ -351,7 +453,7 @@ EXPORT_SYMBOL_GPL(tcp_vegas_get_info);
 
 static struct tcp_congestion_ops tcp_vegas __read_mostly = {
 	.init		= tcp_vegas_init,
-	.ssthresh	= tcp_reno_ssthresh,
+	.ssthresh	= tcp_vegas_loss_ssthresh,
 	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cong_avoid	= tcp_vegas_cong_avoid,
 	.pkts_acked	= tcp_vegas_pkts_acked,
