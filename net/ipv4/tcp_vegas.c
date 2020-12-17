@@ -246,7 +246,17 @@ static void tcp_vegas_pow(struct sock *sk, u32 frac)
 	struct vegas *vegas = inet_csk_ca(sk);
 
 	// Region B probability calculation
+	//
+	int i;	
+	vegas->p_dec = p_max - p_min;
 
+	for(i=0; i < power; i++)
+	{
+		vegas->p_dec = (vegas->p_dec * frac) / 1000;	
+	}
+
+	vegas->p_dec = p_min + vegas->p_dec;
+	/*
 	if (power == 1){
 		vegas->p_dec = ((p_min * 1000) + ((p_max - p_min) * frac))/1000;
 	}
@@ -258,8 +268,9 @@ static void tcp_vegas_pow(struct sock *sk, u32 frac)
 	}
 	else
 		vegas->p_dec = ((p_min * 1000 * 1000 * 1000 * 1000) + ((p_max - p_min) * frac * frac * frac * frac))/(1000 * 1000 * 1000 * 1000);
+	*/
 
-	printk(KERN_INFO "Flow ID = %d, max prob of decrease = %d, min  probability of decrease =%d, probability of decrease = %lld, fraction = %d", vegas->id, p_max, p_min,  vegas->p_dec, frac);
+	//printk(KERN_INFO "Flow ID = %d, max prob of decrease = %d, min  probability of decrease = %d, probability of decrease = %lld, fraction = %d", vegas->id, p_max, p_min,  vegas->p_dec, frac);
 
 
 
@@ -316,21 +327,25 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			vegas->p_dec = (p_max * (delta - vegas->beta) * 1000) / (vegas->delth - vegas->beta);
 
 			vegas->p_dec = vegas->p_dec / 1000;
+
+			printk(KERN_INFO "Region A, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
 			
 		}
 		else if (delta < vegas->delmax){
 
 			u32 frac = ((vegas->delmax - delta) * 1000)/ (vegas->delmax - vegas->delth);
 
-			printk(KERN_INFO "frac = %d ", frac);
+			printk(KERN_INFO "Flow ID = %d, frac = %d ", vegas->id, frac);
 			
 			tcp_vegas_pow(sk,frac);
+
+		        printk(KERN_INFO "Region B, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
 			
 		}
-		else
+		else{
 			vegas->p_dec = p_min;
-		
-		printk(KERN_INFO "Flow ID = %d, max prob of decrease = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, vegas->p_dec);
+			printk(KERN_INFO "Region C, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
+		}
 
 		// Random number between 1 to 1000
 
@@ -453,7 +468,7 @@ EXPORT_SYMBOL_GPL(tcp_vegas_get_info);
 
 static struct tcp_congestion_ops tcp_vegas __read_mostly = {
 	.init		= tcp_vegas_init,
-	.ssthresh	= tcp_vegas_loss_ssthresh,
+	.ssthresh	= tcp_reno_ssthresh,
 	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cong_avoid	= tcp_vegas_cong_avoid,
 	.pkts_acked	= tcp_vegas_pkts_acked,

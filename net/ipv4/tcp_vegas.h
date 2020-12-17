@@ -23,7 +23,7 @@ struct vegas {
 	u32	baseRTT;
 	u64 	p_dec;
 	u32	id;
-}
+};
 
 void tcp_vegas_init(struct sock *sk);
 void tcp_vegas_state(struct sock *sk, u8 ca_state);
