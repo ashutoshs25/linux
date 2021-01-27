@@ -127,6 +127,7 @@ static void vegas_enable(struct sock *sk)
 		vegas->alpha = 1 << 8U;
 
 		vegas->baseRTT = 0x7fffffff;
+		vegas->minRTTvar = 0X7fffffff;
 
 		id++;
 		vegas->id = id;			// Flow ID 
@@ -167,6 +168,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	u32 vrtt;
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay;
+	u32 rttvar;
 
 	
 
@@ -178,12 +180,20 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
               	basedelay = vegas->baseRTT;
        	else
           	basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
+
+	
 	
 	if (sample->rtt_us < 0)
 		return;
 
 	/* Never allow zero rtt or baseRTT */
 	vrtt = sample->rtt_us + 1;
+
+
+	rttvar = tp->mdev_us;
+
+	vegas->minRTTvar = min(vegas->minRTTvar, rttvar);
+
 	
 
 	if (vrtt > (basedelay + vegas->beta)) 		// counting of marked ACKS
@@ -191,8 +201,7 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 
 
 
-	/* Find the min and max RTT during the last RTT to find
-	 */
+	
 	vegas->minRTT = min(vegas->minRTT, vrtt);
 	vegas->baseRTT = min(vegas->baseRTT, vrtt);
 	vegas->maxRTT = max(vegas->maxRTT,vrtt);
@@ -346,6 +355,13 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			vegas->p_dec = p_min;
 			printk(KERN_INFO "Region C, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
 		}
+		
+
+		vegas->p_dec = (vegas->p_dec * vegas->minRTTvar * 1000) / (tp->mdev_us);
+		vegas->p_dec = vegas->p_dec / 1000;
+
+		printk(KERN_INFO "Flow ID = %d, min RTT var = %d, rtt var = %d, Prob of decrease after accounting for rtt variance = %lld", vegas->id, vegas->minRTTvar, tp->mdev_us, vegas->p_dec);
+
 
 		// Random number between 1 to 1000
 
