@@ -24,6 +24,7 @@ struct vegas {
 	u32	baseRTT;
 	u64 	p_dec;
 	u32	id;
+	u32 	region_id;
 };
 
 void tcp_vegas_init(struct sock *sk);

@@ -131,6 +131,10 @@ static void vegas_enable(struct sock *sk)
 
 		id++;
 		vegas->id = id;			// Flow ID 
+
+		vegas->region_id = 0;
+
+		/* 0- below del_min, 1 - region A , 2- region B, 3- beyond del_max */
 	}
 
 	/* Begin taking Vegas samples next time we send something. */
@@ -174,12 +178,8 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 
 	if (hardcoding == 0)
         	basedelay = basedelay_hc;
-        else if (hardcoding == 1)
-             	basedelay = minmax_get(&tp->rtt_min);
-       	else if (hardcoding == 2)
-              	basedelay = vegas->baseRTT;
-       	else
-          	basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
+        else
+		basedelay = minmax_get(&tp->rtt_min);
 
 	
 	
@@ -253,9 +253,9 @@ static inline u32 tcp_vegas_loss_ssthresh(struct sock *sk)
 static void tcp_vegas_pow(struct sock *sk, u32 frac)
 {
 	struct vegas *vegas = inet_csk_ca(sk);
-
 	// Region B probability calculation
 	//
+	
 	int i;	
 	vegas->p_dec = p_max - p_min;
 
@@ -265,23 +265,6 @@ static void tcp_vegas_pow(struct sock *sk, u32 frac)
 	}
 
 	vegas->p_dec = p_min + vegas->p_dec;
-	/*
-	if (power == 1){
-		vegas->p_dec = ((p_min * 1000) + ((p_max - p_min) * frac))/1000;
-	}
-	else if (power == 2){
-		vegas->p_dec = ((p_min * 1000 * 1000) + ((p_max - p_min) * frac * frac))/(1000 * 1000);		
-	}
-	else if (power ==3){
-		vegas->p_dec = ((p_min * 1000 * 1000 * 1000) + ((p_max - p_min) * frac * frac * frac))/(1000 * 1000 * 1000);
-	}
-	else
-		vegas->p_dec = ((p_min * 1000 * 1000 * 1000 * 1000) + ((p_max - p_min) * frac * frac * frac * frac))/(1000 * 1000 * 1000 * 1000);
-	*/
-
-	//printk(KERN_INFO "Flow ID = %d, max prob of decrease = %d, min  probability of decrease = %d, probability of decrease = %lld, fraction = %d", vegas->id, p_max, p_min,  vegas->p_dec, frac);
-
-
 
 }
 
@@ -306,12 +289,9 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
                 if (hardcoding == 0)
                         basedelay = basedelay_hc;
-                else if (hardcoding == 1)
-                        basedelay = minmax_get(&tp->rtt_min);
-		else if (hardcoding == 2)
-			basedelay = vegas->baseRTT;
-		else
-			basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
+                else
+			basedelay = minmax_get(&tp->rtt_min);
+		
 
 		
 		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;		// EWMA(fraction of marked packets)
@@ -327,8 +307,11 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		
 		// vegas->beta is del_min of the Cx-TCP paper 
 
-		if (delta <= vegas->beta) 
+		if (delta <= vegas->beta){
 			vegas->p_dec = 0;
+			vegas->region_id = 0;
+		}
+
 		else if (delta < vegas->delth){
 
 			// Region A 
@@ -337,10 +320,12 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 			vegas->p_dec = vegas->p_dec / 1000;
 
-			printk(KERN_INFO "Region A, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
+			vegas->region_id = 1;
 			
 		}
 		else if (delta < vegas->delmax){
+
+			// Region B 
 
 			u32 frac = ((vegas->delmax - delta) * 1000)/ (vegas->delmax - vegas->delth);
 
@@ -348,19 +333,24 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			
 			tcp_vegas_pow(sk,frac);
 
-		        printk(KERN_INFO "Region B, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
+			vegas->region_id = 2;
+
 			
 		}
 		else{
 			vegas->p_dec = p_min;
-			printk(KERN_INFO "Region C, Flow ID = %d, max prob = %d, min prob = %d, probability of decrease * 1000 =%lld", vegas->id, p_max, p_min, vegas->p_dec);
+
+			vegas->region_id = 3;
+			
 		}
+
+		u64 p_dec_initial = vegas->p_dec;
 		
 
 		vegas->p_dec = (vegas->p_dec * vegas->minRTTvar * 1000) / (tp->mdev_us);
 		vegas->p_dec = vegas->p_dec / 1000;
 
-		printk(KERN_INFO "Flow ID = %d, min RTT var = %d, rtt var = %d, Prob of decrease after accounting for rtt variance = %lld", vegas->id, vegas->minRTTvar, tp->mdev_us, vegas->p_dec);
+		printk(KERN_INFO "Flow ID = %d, region id = %d, min RTT var = %d, rtt var = %d, Prob of decrease = %lld, Prob of decrease final = %lld, CWND = %d, SRTT = %d", vegas->id, vegas->region_id, vegas->minRTTvar, tp->mdev_us, p_dec_initial, vegas->p_dec, tp->snd_cwnd, srtt);
 
 
 		// Random number between 1 to 1000
@@ -418,7 +408,6 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 					      tp->snd_ssthresh
                                                         = tcp_vegas_ssthresh(tp);
 
-					      printk(KERN_INFO "Flow ID = %d, CWND = %d,", vegas->id, tp->snd_cwnd);
 				      }
 						
 				      else{
