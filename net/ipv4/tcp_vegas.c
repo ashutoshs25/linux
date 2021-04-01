@@ -66,6 +66,10 @@ static int fractional = 0;
 
 static int id = 0;
 
+static int mdev_scaling = 1;
+
+static int gradual_mark = 1;
+
 
 module_param(betao, int, 0644);
 MODULE_PARM_DESC(betao, "delay threshold");
@@ -91,6 +95,10 @@ module_param(fractional, int, 0644);
 MODULE_PARM_DESC(fractional, "fractional decrease");
 module_param(power, int, 0644);
 MODULE_PARM_DESC(power, "Power");
+module_param(mdev_scaling, int, 0644);
+MODULE_PARM_DESC(mdev_scaling, "mdev_scaling");
+module_param(gradual_mark, int, 0644);
+MODULE_PARM_DESC(gradual_mark, "gradual_mark");
 
 
 
@@ -285,16 +293,10 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 		srtt = tp->srtt_us >> 3;
 
-		printk(KERN_INFO "Flow ID : %d, marked=%d total=%d\n",vegas->id, vegas->marked,vegas->cntRTT);
-
                 if (hardcoding == 0)
                         basedelay = basedelay_hc;
                 else
 			basedelay = minmax_get(&tp->rtt_min);
-		
-
-		
-		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;		// EWMA(fraction of marked packets)
 		
 		
 	
@@ -344,13 +346,41 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			
 		}
 
+
+		u32 mark_init;
+
+
+		mark_init = vegas->marked;
+
+		printk(KERN_INFO "Flow ID =  %d, marked_init = %d", vegas->id,mark_init);
+
+		if (gradual_mark == 1){
+
+			if (vegas->region_id == 1){
+
+				vegas->marked = (vegas->marked * vegas->p_dec) / 1000;
+			}
+
+		}
+
+		printk(KERN_INFO "Flow ID =  %d, marked_final = %d", vegas->id, vegas->marked);
+
+
+		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;            // EWMA(fraction of marked packets)
+
+
 		u64 p_dec_initial = vegas->p_dec;
-		
 
-		vegas->p_dec = (vegas->p_dec * vegas->minRTTvar * 1000) / (tp->mdev_us);
-		vegas->p_dec = vegas->p_dec / 1000;
 
-		printk(KERN_INFO "Flow ID = %d, region id = %d, min RTT var = %d, rtt var = %d, Prob of decrease = %lld, Prob of decrease final = %lld, CWND = %d, SRTT = %d", vegas->id, vegas->region_id, vegas->minRTTvar, tp->mdev_us, p_dec_initial, vegas->p_dec, tp->snd_cwnd, srtt);
+		if (mdev_scaling == 1){
+
+			vegas->p_dec = (vegas->p_dec * vegas->minRTTvar * 1000) / (tp->mdev_us);
+                	vegas->p_dec = vegas->p_dec / 1000;
+
+		}
+
+
+		printk(KERN_INFO "Flow ID = %d, region id = %d, min RTT var = %d, rtt var = %d, Prob of decrease = %lld, Prob of decrease final = %lld, CWND = %d, SRTT = %d, markedinit = %d, marked = %d, total = %d", vegas->id, vegas->region_id, vegas->minRTTvar, tp->mdev_us, p_dec_initial, vegas->p_dec, tp->snd_cwnd, srtt, mark_init, vegas->marked, vegas->cntRTT);
 
 
 		// Random number between 1 to 1000
@@ -411,14 +441,15 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 				      }
 						
 				      else{
-						tp->snd_cwnd++;
+
+                                        	if (rtt_fairness == 0)
+                                                	tp->snd_cwnd++;          // additive increase
+                                 	        else if (rtt_fairness == 1)
+                                                	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
+                                 	        else
+                                                	tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(tp->srtt_us >> 3));
 				      }
 
-
-				       
-
-					tp->snd_ssthresh
-						= tcp_vegas_ssthresh(tp);
 				} else {
 					/* We don't have enough extra packets
 					 * in the network, so speed up.
