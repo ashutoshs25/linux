@@ -13,18 +13,20 @@ struct vegas {
 	u8	doing_vegas_now;/* if true, do vegas for this RTT */
 	u32	cntRTT;		/* # of RTTs measured within last RTT */
 	u32	minRTT;		/* min of RTTs measured within last RTT (in usec) */
-	u32	minRTTvar;
 	u32	marked;
 	u32	alpha;
+	u32	starve;
+	u32	active_dec;
 	u32	beta;
-	u32 	delth;
-	u32	delmax;
 	u32	start;
 	u32	maxRTT;
 	u32	baseRTT;
-	u64 	p_dec;
-	u32	id;
-	u32 	region_id;
+	u32 	old_cwnd;
+	u32	old_beta;
+	u32 	count_to_dip;
+	u32	count_to_normal;
+	int 	id;
+	u32	prev_rtt;
 };
 
 void tcp_vegas_init(struct sock *sk);
@@ -35,3 +37,4 @@ size_t tcp_vegas_get_info(struct sock *sk, u32 ext, int *attr,
 			  union tcp_cc_info *info);
 
 #endif	/* __TCP_VEGAS_H */
+

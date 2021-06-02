@@ -42,34 +42,25 @@
 #include "tcp_vegas.h"
 
 
-static int betao = 2000;	   // threshold of our scheme = del-min of Cx-TCP
+static int compete = 1;
+static int comeback = 1;
+static int betao = 2000;
 static int gamma = 4;
-
-static unsigned int g = 4;	   // EWMA smoothing factor G = 2^g, e.g. g=4 means alpha = (1*alpha_old + 15*alpha_new)/16
-
-static int rtt_fairness = 0;
-
-
-static int hardcoding = 1;	  // option to hardcode the basedelay (1 here means we use actual measured min RTT)
+static int gg = 4;
+static int delta = 100;
+static unsigned int g = 4;
+static int inc_thresh = 5;
+static int reset = 0; 
+static int rtt_fairness = 2;
+static int hardcoding = 3;
 static int basedelay_hc = 2000;
-
-
-static int del_max = 15000;	// delay thresholds are in micro seconds
-static int del_th = 4000;
-
-static int p_max = 1000;      // Probability values are up-scaled to the range 0 - 1000
-static int p_min = 0;
-
-static int power = 2;
-
-static int fractional = 0;
-
+static int m_i = 50;
+static const u32 vegas_round = 1000;
+static int k_inc = 1;
+static int P1 = 100;
+static int P2 = 5;
+static int drop = 10;
 static int id = 0;
-
-static int mdev_scaling = 1;
-
-static int gradual_mark = 1;
-
 
 module_param(betao, int, 0644);
 MODULE_PARM_DESC(betao, "delay threshold");
@@ -77,28 +68,34 @@ module_param(gamma, int, 0644);
 MODULE_PARM_DESC(gamma, "RTT fairness scaling factor");
 module_param(g, uint, 0644);
 MODULE_PARM_DESC(g, "WMA shift parameter");
+module_param(gg, uint, 0644);
+MODULE_PARM_DESC(gg, "WMA shift parameter for gradient");
+module_param(inc_thresh, int, 0644);
+MODULE_PARM_DESC(inc_thresh, "consecutive starves before increasing threshold");
 module_param(rtt_fairness, int, 0644);
 MODULE_PARM_DESC(rtt_fairness, "RTT fairness mode 0-no change, 1-increasing speed in 5ms intervals, 2- directly proportional");
 module_param(hardcoding, int, 0644);
-MODULE_PARM_DESC(hardcoding, "1 - using socket basedelay,0 - using hardcoded based delay");
+MODULE_PARM_DESC(hardcoding, "0 - using socket basedelay,1 - using hardcoded based delay");
 module_param(basedelay_hc, int, 0644);
 MODULE_PARM_DESC(basedelay_hc, "value of basedelay to be used if hardcoding = 1");
-module_param(del_th, int, 0644);
-MODULE_PARM_DESC(del_th, "delay threshold at which max prob of decrease");
-module_param(del_max, int, 0644);
-MODULE_PARM_DESC(del_max, "max delay threshold");
-module_param(p_max, int, 0644);
-MODULE_PARM_DESC(p_max, "max prob of decrease");
-module_param(p_min, int, 0644);
-MODULE_PARM_DESC(p_min, "min prob of decrease");
-module_param(fractional, int, 0644);
-MODULE_PARM_DESC(fractional, "fractional decrease");
-module_param(power, int, 0644);
-MODULE_PARM_DESC(power, "Power");
-module_param(mdev_scaling, int, 0644);
-MODULE_PARM_DESC(mdev_scaling, "mdev_scaling");
-module_param(gradual_mark, int, 0644);
-MODULE_PARM_DESC(gradual_mark, "gradual_mark");
+module_param(compete, int, 0644);
+MODULE_PARM_DESC(compete, "1- competition enabled,2- no competition");
+module_param(comeback, int, 0644);
+MODULE_PARM_DESC(comeback, "1- resume low delay enabled,2- no resume low delay");
+module_param(m_i, int, 0644);
+MODULE_PARM_DESC(m_i, "aggressiveness of threshold increase");
+module_param(delta, int, 0644);
+MODULE_PARM_DESC(delta, "Delta parameter");
+module_param(reset, int, 0644);
+MODULE_PARM_DESC(reset, "just another parameter");
+module_param(k_inc, uint, 0644);
+MODULE_PARM_DESC(k_inc, "sigmoid increase steepness");
+module_param(P1, int, 0644);
+MODULE_PARM_DESC(P1, "no of RTTs after which to decrease threshold");
+module_param(P2, int, 0644);
+MODULE_PARM_DESC(P2, "no of RTTs after which to resume normal operation");
+module_param(drop, int, 0644);
+MODULE_PARM_DESC(drop, "percentage drop in  threshold and cwnd");
 
 
 
@@ -124,25 +121,17 @@ static void vegas_enable(struct sock *sk)
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct vegas *vegas = inet_csk_ca(sk);
 	
-	if (vegas->start == 0){   
-
+	if (vegas->start == 0){
 		vegas->beta = betao;
-		vegas->delth = del_th;
-		vegas->delmax = del_max;
-
 		vegas->start = 1;
-
 		vegas->alpha = 1 << 8U;
-
 		vegas->baseRTT = 0x7fffffff;
-		vegas->minRTTvar = 0X7fffffff;
-
+		vegas->active_dec = 0;
+		vegas->count_to_normal = 0;
+		vegas->count_to_dip = 0;
 		id++;
-		vegas->id = id;			// Flow ID 
+		vegas->id = id;
 
-		vegas->region_id = 0;
-
-		/* 0- below del_min, 1 - region A , 2- region B, 3- beyond del_max */
 	}
 
 	/* Begin taking Vegas samples next time we send something. */
@@ -180,38 +169,31 @@ void tcp_vegas_pkts_acked(struct sock *sk, const struct ack_sample *sample)
 	u32 vrtt;
 	struct tcp_sock *tp = tcp_sk(sk);
 	u32 basedelay;
-	u32 rttvar;
 
-	
+	vegas->baseRTT = min(vegas->baseRTT, vrtt);
 
 	if (hardcoding == 0)
         	basedelay = basedelay_hc;
-        else
-		basedelay = minmax_get(&tp->rtt_min);
-
-	
+        else if (hardcoding == 1)
+             	basedelay = minmax_get(&tp->rtt_min);
+       	else if (hardcoding == 2)
+              	basedelay = vegas->baseRTT;
+       	else
+          	basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
 	
 	if (sample->rtt_us < 0)
 		return;
 
 	/* Never allow zero rtt or baseRTT */
 	vrtt = sample->rtt_us + 1;
-
-
-	rttvar = tp->mdev_us;
-
-	vegas->minRTTvar = min(vegas->minRTTvar, rttvar);
-
 	
 
-	if (vrtt > (basedelay + vegas->beta)) 		// counting of marked ACKS
+	if (vrtt > (basedelay + vegas->beta))
 		vegas->marked++;
 
-
-
-	
+	/* Find the min and max RTT during the last RTT to find
+	 */
 	vegas->minRTT = min(vegas->minRTT, vrtt);
-	vegas->baseRTT = min(vegas->baseRTT, vrtt);
 	vegas->maxRTT = max(vegas->maxRTT,vrtt);
 	vegas->cntRTT++;
 }
@@ -249,7 +231,7 @@ static inline u32 tcp_vegas_ssthresh(struct tcp_sock *tp)
 }
 
 static inline u32 tcp_vegas_loss_ssthresh(struct sock *sk)
-{
+{	
 	struct tcp_sock *tp = tcp_sk(sk);
         struct vegas *vegas = inet_csk_ca(sk);
 
@@ -258,23 +240,21 @@ static inline u32 tcp_vegas_loss_ssthresh(struct sock *sk)
         return  min(tp->snd_ssthresh, tp->snd_cwnd);
 }
 
-static void tcp_vegas_pow(struct sock *sk, u32 frac)
+static u32 tcp_vegas_exp(s32 x)
 {
-	struct vegas *vegas = inet_csk_ca(sk);
-	// Region B probability calculation
-	//
-	
-	int i;	
-	vegas->p_dec = p_max - p_min;
+	s64 temp = 1000;
+	s64 exp = 1000;
+	int i;
 
-	for(i=0; i < power; i++)
-	{
-		vegas->p_dec = (vegas->p_dec * frac) / 1000;	
+	for (i = 1; temp != 0; i++) {
+		temp *= x;
+		temp /= i;
+		temp /= 1000;
+		exp += temp;
 	}
-
-	vegas->p_dec = p_min + vegas->p_dec;
-
+	return exp;
 }
+
 
 static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
@@ -288,106 +268,151 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 	if (after(ack, vegas->beg_snd_nxt)) {
 		
-		u32 basedelay; 
-		u32 srtt; 
-
-		srtt = tp->srtt_us >> 3;
-
+		u32 basedelay;
+		
+		
+		printk(KERN_INFO "Flow ID : %d, marked=%d total=%d\n",vegas->id, vegas->marked,vegas->cntRTT);
                 if (hardcoding == 0)
                         basedelay = basedelay_hc;
-                else
-			basedelay = minmax_get(&tp->rtt_min);
+                else if (hardcoding == 1)
+                        basedelay = minmax_get(&tp->rtt_min);
+		else if (hardcoding == 2)
+			basedelay = vegas->baseRTT;
+		else
+			basedelay = max(vegas->baseRTT,minmax_get(&tp->rtt_min));
+
 		
+		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;
+		// vegas->alpha = (vegas->marked << i8U) / vegas->cntRTT;
+		
+
+		if (comeback == 1){
+		
+			if (vegas->active_dec == 0){
+				vegas->count_to_dip++;
+
+				
+	
+				if (vegas->count_to_dip == P1){
+					
+					printk(KERN_INFO "Flow ID : %d,count to dip=%d", vegas->id, vegas->count_to_dip);
+
+					vegas->active_dec = 1;
+	
+					vegas->old_beta = vegas->beta;
+
+					vegas->old_cwnd = tp->snd_cwnd;
+
+					printk(KERN_INFO "Flow ID: %d,threshold before decrease=%d,cwnd before decrease = %d", vegas->id, vegas->old_beta,vegas->old_cwnd);
+
+					vegas->beta = max((drop * vegas->beta)/100, betao);
+
+					tp->snd_cwnd = (drop * tp->snd_cwnd)/100;
+
+					printk(KERN_INFO "Flow ID : %d,threshold after decrease=%d, cwnd after decrease = %d", vegas->id, vegas->beta,tp->snd_cwnd);
+	
+					vegas->starve = 0;
+	
+					vegas->count_to_dip = 0;
+				}
+	
+	
+			}
+	
+			if (vegas->active_dec == 1){
 		
 	
-		// Cx-TCP probability calculation
+	
+				vegas->count_to_normal++;
+				
+				if (vegas->count_to_normal > 1){
 
-		u32 delta;
-		delta = srtt - basedelay;
+					if (vegas->marked == 0){
+						
+                                        	vegas->active_dec = 0;
+                                 	        vegas->count_to_normal = 0;
+                          	      }
+				}
 
-		printk(KERN_INFO "Flow ID = %d, delta = %d, delta_th = %d, delta_max = %d, delta_min = %d", vegas->id, delta, vegas->delth, vegas->delmax, vegas->beta);
+				
+				if (vegas->count_to_normal == P2 + 1){
+	
+	
+					vegas->active_dec = 0;
+					vegas->beta = vegas->old_beta;
+					tp->snd_cwnd = vegas->old_cwnd;
+					
+					printk(KERN_INFO "Flow ID : %d, Restored threshold =%d, Restored CWND = %d", vegas->id, vegas->beta,tp->snd_cwnd);
+
+					vegas->count_to_normal = 0;
+	
+				}
 		
-		// vegas->beta is del_min of the Cx-TCP paper 
-
-		if (delta <= vegas->beta){
-			vegas->p_dec = 0;
-			vegas->region_id = 0;
+			}
 		}
+		else
+			vegas->active_dec = 0;
 
-		else if (delta < vegas->delth){
 
-			// Region A 
 
-			vegas->p_dec = (p_max * (delta - vegas->beta) * 1000) / (vegas->delth - vegas->beta);
 
-			vegas->p_dec = vegas->p_dec / 1000;
-
-			vegas->region_id = 1;
-			
-		}
-		else if (delta < vegas->delmax){
-
-			// Region B 
-
-			u32 frac = ((vegas->delmax - delta) * 1000)/ (vegas->delmax - vegas->delth);
-
-			printk(KERN_INFO "Flow ID = %d, frac = %d ", vegas->id, frac);
-			
-			tcp_vegas_pow(sk,frac);
-
-			vegas->region_id = 2;
-
-			
-		}
+		
+		// algorithm for competing with loss based / new flows
+		
+		printk(KERN_INFO "Flow ID : %d, decrease activated = %d",vegas->id, vegas->active_dec);
+		
+		if ((vegas->marked >= ((delta * vegas->cntRTT)/100)) && (vegas->active_dec == 0)) 
+			vegas->starve++;
 		else{
-			vegas->p_dec = p_min;
+			if (vegas->starve > 0){
 
-			vegas->region_id = 3;
-			
+				if (reset==0)
+					vegas->starve = 0;
+				else
+					vegas->starve--;
+
+			}
 		}
 
 
-		u32 mark_init;
+
+		
+
+		u32 current_rtt; u32 threshold;
+		current_rtt = (tp->srtt_us >> 3);
+		threshold = basedelay + vegas->beta;
+		
+		if ((current_rtt > threshold) && (vegas->starve > 0) && (vegas->active_dec == 0)){
+
+			if (compete == 1){
+
+				u64 sig;
+
+				if (vegas->starve >= inc_thresh)
+					sig = (tcp_vegas_exp(vegas_round*k_inc*(vegas->starve - inc_thresh)) * 100)/(vegas_round + tcp_vegas_exp(vegas_round*k_inc*(vegas->starve - inc_thresh)));
+				else if (vegas->starve == inc_thresh)
+					sig = 50;
+				else
+					sig = (100 * vegas_round)/(vegas_round + tcp_vegas_exp(vegas_round*k_inc*(inc_thresh-vegas->starve))) ; 
+
+				
+				printk(KERN_INFO "Flow ID : %d,old threshold before increase = %d",vegas->id, vegas->beta);
+
+				printk(KERN_INFO "Flow ID : %d,sigmoid = %d,exp = %lld,starve = %d",vegas->id, sig,tcp_vegas_exp(vegas_round*k_inc*abs(vegas->starve-inc_thresh)),vegas->starve);
 
 
-		mark_init = vegas->marked;
+				vegas->beta = vegas->beta + ((sig * m_i * (current_rtt - threshold))/10000);
 
-		printk(KERN_INFO "Flow ID =  %d, marked_init = %d", vegas->id,mark_init);
-
-		if (gradual_mark == 1){
-
-			if (vegas->region_id == 1){
-
-				vegas->marked = (vegas->marked * vegas->p_dec) / 1000;
+				printk(KERN_INFO "Flow ID : %d,new threshold after increase = %d",vegas->id, vegas->beta);
+				
 			}
 
-		}
 
-		printk(KERN_INFO "Flow ID =  %d, marked_final = %d", vegas->id, vegas->marked);
-
-
-		vegas->alpha = (((1 << g)-1)*vegas->alpha + 1*((vegas->marked << 8U) / vegas->cntRTT)) >> g;            // EWMA(fraction of marked packets)
-
-
-		u64 p_dec_initial = vegas->p_dec;
-
-
-		if (mdev_scaling == 1){
-
-			vegas->p_dec = (vegas->p_dec * vegas->minRTTvar * 1000) / (tp->mdev_us);
-                	vegas->p_dec = vegas->p_dec / 1000;
 
 		}
 
+		
 
-		printk(KERN_INFO "Flow ID = %d, region id = %d, min RTT var = %d, rtt var = %d, Prob of decrease = %lld, Prob of decrease final = %lld, CWND = %d, SRTT = %d, markedinit = %d, marked = %d, total = %d", vegas->id, vegas->region_id, vegas->minRTTvar, tp->mdev_us, p_dec_initial, vegas->p_dec, tp->snd_cwnd, srtt, mark_init, vegas->marked, vegas->cntRTT);
-
-
-		// Random number between 1 to 1000
-
-		int i, lessthan1000;
-		get_random_bytes(&i, sizeof(i));
-		lessthan1000 = abs(i) % 1000;
 
 
 		
@@ -420,48 +445,34 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 				/* Slow start.  */
 				tcp_slow_start(tp, acked);
 			} else {
+
+				
+
+			
 				/* Congestion avoidance. */
 
-				if (vegas->marked > 0) {
+				if (vegas->active_dec == 0){
 
-				      printk(KERN_INFO "Flow ID = %d, random number = %d, probability of decrease * 1000 =%lld, comparison = %d", vegas->id, lessthan1000, vegas->p_dec, lessthan1000 < vegas->p_dec);
+					if (vegas->marked > 0) {
 					
-				      if (lessthan1000 < vegas->p_dec){
-
-
-					      if (fractional == 0){
-						      tp->snd_cwnd = (tp->snd_cwnd) >> 1U;  // halving the CWND
-					      }
-					      else
-						      tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;   // DCTCP style decrease
-
-					      tp->snd_ssthresh
-                                                        = tcp_vegas_ssthresh(tp);
-
-				      }
-						
-				      else{
-
-                                        	if (rtt_fairness == 0)
-                                                	tp->snd_cwnd++;          // additive increase
-                                 	        else if (rtt_fairness == 1)
-                                                	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
-                                 	        else
-                                                	tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(tp->srtt_us >> 3));
-				      }
-
-				} else {
-					/* We don't have enough extra packets
-					 * in the network, so speed up.
-					 */
+						// fractional cwnd decrease (DCTCP)
+						tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;
+						tp->snd_ssthresh
+							= tcp_vegas_ssthresh(tp);
+					} else {
+						/* We don't have enough extra packets
+						 * in the network, so speed up.
+					 	*/
 					
-					if (rtt_fairness == 0)
-                                                tp->snd_cwnd++;          // additive increase
-                                    	else if (rtt_fairness == 1)
-                                             	tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
-                                      	else
-                              			tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(tp->srtt_us >> 3));
+						if (rtt_fairness == 0)
+                                               		 tp->snd_cwnd++;          // additive increase
+                                 	   	else if (rtt_fairness == 1)
+                                             		tp->snd_cwnd = tp->snd_cwnd + 1 + (basedelay/5000);
+                                      		else
+                              				tp->snd_cwnd = tp->snd_cwnd + 1 + ((gamma * basedelay)/(basedelay + vegas->beta));
+					}
 				}
+
 			}
 
 			if (tp->snd_cwnd < 2)
@@ -475,8 +486,12 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		/* Wipe the slate clean for the next RTT. */
 		vegas->cntRTT = 0;
 		vegas->marked = 0;
+		
 		vegas->minRTT = 0x7fffffff;
+	
 		vegas->maxRTT = 0;
+
+		vegas->prev_rtt = current_rtt;
 	}
 	/* Use normal slow start */
 	else if (tcp_in_slow_start(tp))
@@ -504,7 +519,7 @@ EXPORT_SYMBOL_GPL(tcp_vegas_get_info);
 
 static struct tcp_congestion_ops tcp_vegas __read_mostly = {
 	.init		= tcp_vegas_init,
-	.ssthresh	= tcp_reno_ssthresh,
+	.ssthresh	= tcp_vegas_loss_ssthresh,
 	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cong_avoid	= tcp_vegas_cong_avoid,
 	.pkts_acked	= tcp_vegas_pkts_acked,
@@ -534,3 +549,4 @@ module_exit(tcp_vegas_unregister);
 MODULE_AUTHOR("Stephen Hemminger");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("TCP Vegas");
+
