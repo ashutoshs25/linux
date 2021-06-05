@@ -25,6 +25,8 @@ struct vegas {
 	u64 	p_dec;
 	u32	id;
 	u32 	region_id;
+	u32	shcwnd;
+	u32 	del_trigger;
 };
 
 void tcp_vegas_init(struct sock *sk);

@@ -131,6 +131,8 @@ static void vegas_enable(struct sock *sk)
 		vegas->delmax = del_max;
 
 		vegas->start = 1;
+		vegas->shcwnd = 0;
+
 
 		vegas->alpha = 1 << 8U;
 
@@ -141,6 +143,8 @@ static void vegas_enable(struct sock *sk)
 		vegas->id = id;			// Flow ID 
 
 		vegas->region_id = 0;
+
+		vegas->del_trigger = 0x7fffffff;
 
 		/* 0- below del_min, 1 - region A , 2- region B, 3- beyond del_max */
 	}
@@ -253,7 +257,9 @@ static inline u32 tcp_vegas_loss_ssthresh(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
         struct vegas *vegas = inet_csk_ca(sk);
 
-	vegas->marked++;
+	tp->snd_cwnd = (max(tp->snd_cwnd, vegas->shcwnd)) >> 1U;
+
+	vegas->shcwnd = vegas->shcwnd >> 1U;
 
         return  min(tp->snd_ssthresh, tp->snd_cwnd);
 }
@@ -312,6 +318,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		if (delta <= vegas->beta){
 			vegas->p_dec = 0;
 			vegas->region_id = 0;
+			vegas->shcwnd = 0;
+			vegas->del_trigger = 0x7fffffff;
 		}
 
 		else if (delta < vegas->delth){
@@ -323,7 +331,12 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			vegas->p_dec = vegas->p_dec / 1000;
 
 			vegas->region_id = 1;
-			
+
+			if (srtt > vegas->del_trigger)
+				vegas->shcwnd = max(vegas->shcwnd, tp->snd_cwnd);
+			else
+				vegas->shcwnd = 0;
+			 
 		}
 		else if (delta < vegas->delmax){
 
@@ -336,6 +349,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			tcp_vegas_pow(sk,frac);
 
 			vegas->region_id = 2;
+			vegas->shcwnd = max(vegas->shcwnd, tp->snd_cwnd);
 
 			
 		}
@@ -343,6 +357,7 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 			vegas->p_dec = p_min;
 
 			vegas->region_id = 3;
+			vegas->shcwnd = max(vegas->shcwnd, tp->snd_cwnd);
 			
 		}
 
@@ -379,8 +394,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 		}
 
-
-		printk(KERN_INFO "Flow ID = %d, region id = %d, min RTT var = %d, rtt var = %d, Prob of decrease = %lld, Prob of decrease final = %lld, CWND = %d, SRTT = %d, markedinit = %d, marked = %d, total = %d", vegas->id, vegas->region_id, vegas->minRTTvar, tp->mdev_us, p_dec_initial, vegas->p_dec, tp->snd_cwnd, srtt, mark_init, vegas->marked, vegas->cntRTT);
+ 
+		printk(KERN_INFO "Flow ID = %d, region id = %d, min RTT var = %d, rtt var = %d, Prob of decrease = %lld, Prob of decrease final = %lld, CWND = %d, shadow_cwnd = %d, SRTT = %d, markedinit = %d, marked = %d, total = %d", vegas->id, vegas->region_id, vegas->minRTTvar, tp->mdev_us, p_dec_initial, vegas->p_dec, tp->snd_cwnd, vegas->shcwnd, srtt, mark_init, vegas->marked, vegas->cntRTT);
 
 
 		// Random number between 1 to 1000
@@ -428,9 +443,12 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 					
 				      if (lessthan1000 < vegas->p_dec){
 
+					      vegas->del_trigger = srtt;
+
 
 					      if (fractional == 0){
 						      tp->snd_cwnd = (tp->snd_cwnd) >> 1U;  // halving the CWND
+
 					      }
 					      else
 						      tp->snd_cwnd = ((tp->snd_cwnd << 8U) - ((tp->snd_cwnd * vegas->alpha) >> 1U)) >> 8U;   // DCTCP style decrease
@@ -441,6 +459,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 				      }
 						
 				      else{
+					        if (vegas->shcwnd > 0)
+							vegas->shcwnd++;
 
                                         	if (rtt_fairness == 0)
                                                 	tp->snd_cwnd++;          // additive increase
@@ -504,7 +524,7 @@ EXPORT_SYMBOL_GPL(tcp_vegas_get_info);
 
 static struct tcp_congestion_ops tcp_vegas __read_mostly = {
 	.init		= tcp_vegas_init,
-	.ssthresh	= tcp_reno_ssthresh,
+	.ssthresh	= tcp_vegas_loss_ssthresh,
 	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cong_avoid	= tcp_vegas_cong_avoid,
 	.pkts_acked	= tcp_vegas_pkts_acked,
