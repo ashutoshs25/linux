@@ -42,16 +42,16 @@
 #include "tcp_vegas.h"
 
 
-static int compete = 1;
-static int comeback = 1;
+static int compete = 0;
+static int comeback = 0;
 static int betao = 2000;
 static int gamma = 4;
 static int delta = 100;
 static unsigned int g = 4;
 static int inc_thresh = 5;
 static int starve_rst = 5;
-static int rtt_fairness = 2;
-static int hardcoding = 3;
+static int rtt_fairness = 0;
+static int hardcoding = 1;
 static int basedelay_hc = 2000;
 static int m = 50;
 
