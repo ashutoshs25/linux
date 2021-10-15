@@ -60,15 +60,15 @@ static int del_th = 4000;
 static int p_max = 1000;      // Probability values are up-scaled to the range 0 - 1000
 static int p_min = 0;
 
-static int power = 2;
+static int power = 4;
 
 static int fractional = 0;
 
 static int id = 0;
 
-static int mdev_scaling = 1;
+static int mdev_scaling = 0;
 
-static int gradual_mark = 1;
+static int gradual_mark = 0;
 
 
 module_param(betao, int, 0644);
