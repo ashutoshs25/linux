@@ -1,3 +1,15 @@
+Delay-based congestion control implementation is in net/ipv4/tcp_vegas.c
+
+Switch to the approporiate branch based on the coexistence algorithm you are looking for:
+
+* ``testing`` branch : Threshold adaptation, threshold adaptation with delay gradient
+* ``periodic_backoff`` branch : Threshold adaptation with periodic backoff solution 
+* ``fair_coexistence`` branch : Cx-TCP algorithm, Cx-TCP with RTT variance scaling
+* ``shadow_cwnd`` branch : Cx-TCP with shadow CWND
+
+
+
+
 Linux kernel
 ============
 
